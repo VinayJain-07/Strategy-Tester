@@ -1,0 +1,473 @@
+import React, { useState, useEffect } from 'react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ScatterChart, Scatter, ReferenceLine } from 'recharts';
+import { Upload, TrendingUp, TrendingDown, DollarSign, Calendar, BarChart3, Target, Activity } from 'lucide-react';
+
+const EMAStrategyTester = () => {
+  const [data, setData] = useState([]);
+  const [strategyResults, setStrategyResults] = useState(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [file, setFile] = useState(null);
+
+  // Calculate EMA
+  const calculateEMA = (prices, period) => {
+    const ema = [];
+    const multiplier = 2 / (period + 1);
+    
+    // First EMA is simple moving average
+    const sma = prices.slice(0, period).reduce((sum, price) => sum + price, 0) / period;
+    ema.push(sma);
+    
+    // Calculate remaining EMAs
+    for (let i = period; i < prices.length; i++) {
+      const prevEMA = ema[i - period];
+      const currentEMA = (prices[i] - prevEMA) * multiplier + prevEMA;
+      ema.push(currentEMA);
+    }
+    
+    return ema;
+  };
+
+  // Process CSV data
+  const processCSVData = async (csvText) => {
+    const lines = csvText.trim().split('\n');
+    const headers = lines[0].split(',').map(h => h.trim());
+    
+    const processedData = [];
+    
+    for (let i = 1; i < lines.length; i++) {
+      const values = lines[i].split(',');
+      if (values.length >= 5) {
+        const row = {
+          date: values[0].trim(),
+          open: parseFloat(values[1]) || 0,
+          high: parseFloat(values[2]) || 0,
+          low: parseFloat(values[3]) || 0,
+          close: parseFloat(values[4]) || 0,
+          volume: parseInt(values[5]) || 0
+        };
+        
+        if (row.close > 0) {
+          processedData.push(row);
+        }
+      }
+    }
+    
+    return processedData.sort((a, b) => new Date(a.date) - new Date(b.date));
+  };
+
+  // Calculate EMA crossover strategy
+  const calculateStrategy = (data) => {
+    const closes = data.map(d => d.close);
+    const ema13 = calculateEMA(closes, 13);
+    const ema21 = calculateEMA(closes, 21);
+    
+    const strategyData = data.map((row, index) => {
+      const ema13Value = index >= 12 ? ema13[index - 12] : null;
+      const ema21Value = index >= 20 ? ema21[index - 20] : null;
+      
+      return {
+        ...row,
+        ema13: ema13Value,
+        ema21: ema21Value,
+        signal: ema13Value && ema21Value ? (ema13Value > ema21Value ? 1 : 0) : 0
+      };
+    });
+
+    // Generate buy/sell signals
+    const signals = [];
+    let position = 0;
+    let prevSignal = 0;
+    
+    strategyData.forEach((row, index) => {
+      if (index > 21) { // Wait for both EMAs to be calculated
+        if (row.signal === 1 && prevSignal === 0) {
+          signals.push({
+            date: row.date,
+            type: 'BUY',
+            price: row.close,
+            ema13: row.ema13,
+            ema21: row.ema21
+          });
+        } else if (row.signal === 0 && prevSignal === 1) {
+          signals.push({
+            date: row.date,
+            type: 'SELL',
+            price: row.close,
+            ema13: row.ema13,
+            ema21: row.ema21
+          });
+        }
+        prevSignal = row.signal;
+      }
+    });
+
+    // Calculate returns
+    const trades = [];
+    let capital = 100000;
+    let shares = 0;
+    let buyPrice = 0;
+    
+    signals.forEach(signal => {
+      if (signal.type === 'BUY' && shares === 0) {
+        shares = capital / signal.price;
+        buyPrice = signal.price;
+        capital = 0;
+        trades.push({
+          ...signal,
+          action: 'BUY',
+          shares: shares,
+          capital: capital
+        });
+      } else if (signal.type === 'SELL' && shares > 0) {
+        capital = shares * signal.price;
+        const profit = capital - (shares * buyPrice);
+        const profitPercent = (profit / (shares * buyPrice)) * 100;
+        
+        trades.push({
+          ...signal,
+          action: 'SELL',
+          shares: 0,
+          capital: capital,
+          profit: profit,
+          profitPercent: profitPercent
+        });
+        shares = 0;
+      }
+    });
+
+    // Calculate final metrics
+    const finalValue = shares > 0 ? shares * strategyData[strategyData.length - 1].close : capital;
+    const totalReturn = ((finalValue - 100000) / 100000) * 100;
+    const buyHoldReturn = ((strategyData[strategyData.length - 1].close - strategyData[0].close) / strategyData[0].close) * 100;
+    
+    const winningTrades = trades.filter(t => t.action === 'SELL' && t.profit > 0);
+    const losingTrades = trades.filter(t => t.action === 'SELL' && t.profit < 0);
+    const winRate = trades.filter(t => t.action === 'SELL').length > 0 ? 
+      (winningTrades.length / trades.filter(t => t.action === 'SELL').length) * 100 : 0;
+
+    return {
+      data: strategyData,
+      signals: signals,
+      trades: trades,
+      metrics: {
+        totalReturn: totalReturn,
+        buyHoldReturn: buyHoldReturn,
+        finalValue: finalValue,
+        totalTrades: trades.filter(t => t.action === 'SELL').length,
+        winningTrades: winningTrades.length,
+        losingTrades: losingTrades.length,
+        winRate: winRate,
+        avgProfit: winningTrades.length > 0 ? winningTrades.reduce((sum, t) => sum + t.profit, 0) / winningTrades.length : 0,
+        avgLoss: losingTrades.length > 0 ? losingTrades.reduce((sum, t) => sum + t.profit, 0) / losingTrades.length : 0,
+        maxDrawdown: 0 // You can calculate this if needed
+      }
+    };
+  };
+
+  // Handle file upload
+  const handleFileUpload = async (event) => {
+    const uploadedFile = event.target.files[0];
+    if (!uploadedFile) return;
+
+    setFile(uploadedFile);
+    setIsProcessing(true);
+
+    try {
+      const text = await uploadedFile.text();
+      const processedData = await processCSVData(text);
+      setData(processedData);
+      
+      const results = calculateStrategy(processedData);
+      setStrategyResults(results);
+    } catch (error) {
+      console.error('Error processing file:', error);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  // Format number for display
+  const formatNumber = (num) => {
+    if (num >= 10000000) return `₹${(num / 10000000).toFixed(2)}Cr`;
+    if (num >= 100000) return `₹${(num / 100000).toFixed(2)}L`;
+    if (num >= 1000) return `₹${(num / 1000).toFixed(2)}K`;
+    return `₹${num.toFixed(2)}`;
+  };
+
+  const formatPercent = (num) => `${num.toFixed(2)}%`;
+
+  // Prepare chart data
+  const chartData = strategyResults ? strategyResults.data.slice(-500).map(d => ({
+    date: d.date,
+    close: d.close,
+    ema13: d.ema13,
+    ema21: d.ema21,
+    signal: d.signal
+  })) : [];
+
+  const signalData = strategyResults ? strategyResults.signals.slice(-100).map(s => ({
+    date: s.date,
+    price: s.price,
+    type: s.type
+  })) : [];
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
+      <div className="max-w-7xl mx-auto">
+        {/* Header */}
+        <div className="text-center mb-8">
+          <h1 className="text-4xl font-bold text-gray-800 mb-2">
+            EMA Crossover Strategy Tester
+          </h1>
+          <p className="text-lg text-gray-600">
+            13 & 21 EMA Strategy Analysis for NIFTY 50
+          </p>
+        </div>
+
+        {/* File Upload */}
+        <div className="bg-white rounded-xl shadow-lg p-6 mb-8">
+          <div className="flex items-center justify-center w-full">
+            <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-gray-300 border-dashed rounded-lg cursor-pointer bg-gray-50 hover:bg-gray-100 transition-colors">
+              <div className="flex flex-col items-center justify-center pt-5 pb-6">
+                <Upload className="w-8 h-8 mb-4 text-gray-500" />
+                <p className="mb-2 text-sm text-gray-500">
+                  <span className="font-semibold">Click to upload</span> your 10-year NIFTY 50 CSV file
+                </p>
+                <p className="text-xs text-gray-500">CSV files only</p>
+              </div>
+              <input
+                type="file"
+                accept=".csv"
+                onChange={handleFileUpload}
+                className="hidden"
+              />
+            </label>
+          </div>
+          
+          {file && (
+            <div className="mt-4 text-sm text-gray-600">
+              <p>Loaded file: {file.name}</p>
+              <p>Data points: {data.length}</p>
+            </div>
+          )}
+        </div>
+
+        {isProcessing && (
+          <div className="bg-white rounded-xl shadow-lg p-6 mb-8">
+            <div className="flex items-center justify-center">
+              <Activity className="w-6 h-6 animate-spin mr-2" />
+              <span>Processing data and calculating strategy...</span>
+            </div>
+          </div>
+        )}
+
+        {/* Strategy Results */}
+        {strategyResults && (
+          <>
+            {/* Key Metrics */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+              <div className="bg-white rounded-xl shadow-lg p-6">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-gray-600">Total Return</p>
+                    <p className={`text-2xl font-bold ${strategyResults.metrics.totalReturn >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                      {formatPercent(strategyResults.metrics.totalReturn)}
+                    </p>
+                  </div>
+                  <TrendingUp className="w-8 h-8 text-green-500" />
+                </div>
+              </div>
+
+              <div className="bg-white rounded-xl shadow-lg p-6">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-gray-600">Buy & Hold</p>
+                    <p className={`text-2xl font-bold ${strategyResults.metrics.buyHoldReturn >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                      {formatPercent(strategyResults.metrics.buyHoldReturn)}
+                    </p>
+                  </div>
+                  <BarChart3 className="w-8 h-8 text-blue-500" />
+                </div>
+              </div>
+
+              <div className="bg-white rounded-xl shadow-lg p-6">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-gray-600">Win Rate</p>
+                    <p className="text-2xl font-bold text-purple-600">
+                      {formatPercent(strategyResults.metrics.winRate)}
+                    </p>
+                  </div>
+                  <Target className="w-8 h-8 text-purple-500" />
+                </div>
+              </div>
+
+              <div className="bg-white rounded-xl shadow-lg p-6">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-gray-600">Total Trades</p>
+                    <p className="text-2xl font-bold text-indigo-600">
+                      {strategyResults.metrics.totalTrades}
+                    </p>
+                  </div>
+                  <DollarSign className="w-8 h-8 text-indigo-500" />
+                </div>
+              </div>
+            </div>
+
+            {/* Detailed Metrics */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+              <div className="bg-white rounded-xl shadow-lg p-6">
+                <h3 className="text-lg font-semibold mb-4">Strategy Performance</h3>
+                <div className="space-y-3">
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Initial Capital:</span>
+                    <span className="font-medium">₹1,00,000</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Final Value:</span>
+                    <span className="font-medium">{formatNumber(strategyResults.metrics.finalValue)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Total Trades:</span>
+                    <span className="font-medium">{strategyResults.metrics.totalTrades}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Winning Trades:</span>
+                    <span className="font-medium text-green-600">{strategyResults.metrics.winningTrades}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Losing Trades:</span>
+                    <span className="font-medium text-red-600">{strategyResults.metrics.losingTrades}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-white rounded-xl shadow-lg p-6">
+                <h3 className="text-lg font-semibold mb-4">Trade Analysis</h3>
+                <div className="space-y-3">
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Average Profit:</span>
+                    <span className="font-medium text-green-600">
+                      {formatNumber(strategyResults.metrics.avgProfit)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Average Loss:</span>
+                    <span className="font-medium text-red-600">
+                      {formatNumber(strategyResults.metrics.avgLoss)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Win Rate:</span>
+                    <span className="font-medium">{formatPercent(strategyResults.metrics.winRate)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Strategy vs Buy & Hold:</span>
+                    <span className={`font-medium ${strategyResults.metrics.totalReturn > strategyResults.metrics.buyHoldReturn ? 'text-green-600' : 'text-red-600'}`}>
+                      {strategyResults.metrics.totalReturn > strategyResults.metrics.buyHoldReturn ? 'Outperformed' : 'Underperformed'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Price Chart with EMAs */}
+            <div className="bg-white rounded-xl shadow-lg p-6 mb-8">
+              <h3 className="text-lg font-semibold mb-4">Price Chart with EMA Signals (Last 500 Days)</h3>
+              <ResponsiveContainer width="100%" height={400}>
+                <LineChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="date" />
+                  <YAxis />
+                  <Tooltip />
+                  <Legend />
+                  <Line type="monotone" dataKey="close" stroke="#1f77b4" name="NIFTY 50" strokeWidth={2} />
+                  <Line type="monotone" dataKey="ema13" stroke="#ff7f0e" name="EMA 13" strokeWidth={2} />
+                  <Line type="monotone" dataKey="ema21" stroke="#2ca02c" name="EMA 21" strokeWidth={2} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+
+            {/* Buy/Sell Signals */}
+            <div className="bg-white rounded-xl shadow-lg p-6 mb-8">
+              <h3 className="text-lg font-semibold mb-4">Buy/Sell Signals (Last 100 Signals)</h3>
+              <ResponsiveContainer width="100%" height={400}>
+                <ScatterChart data={signalData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="date" />
+                  <YAxis />
+                  <Tooltip />
+                  <Legend />
+                  <Scatter
+                    dataKey="price"
+                    fill="#8884d8"
+                    shape={(props) => {
+                      const { cx, cy, payload } = props;
+                      const color = payload.type === 'BUY' ? '#22c55e' : '#ef4444';
+                      const symbol = payload.type === 'BUY' ? '▲' : '▼';
+                      return (
+                        <text x={cx} y={cy} fill={color} fontSize={12} textAnchor="middle" dominantBaseline="middle">
+                          {symbol}
+                        </text>
+                      );
+                    }}
+                  />
+                </ScatterChart>
+              </ResponsiveContainer>
+            </div>
+
+            {/* Recent Trades Table */}
+            <div className="bg-white rounded-xl shadow-lg p-6">
+              <h3 className="text-lg font-semibold mb-4">Recent Trades</h3>
+              <div className="overflow-x-auto">
+                <table className="min-w-full table-auto">
+                  <thead>
+                    <tr className="bg-gray-50">
+                      <th className="px-4 py-2 text-left">Date</th>
+                      <th className="px-4 py-2 text-left">Action</th>
+                      <th className="px-4 py-2 text-left">Price</th>
+                      <th className="px-4 py-2 text-left">Profit/Loss</th>
+                      <th className="px-4 py-2 text-left">Return %</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {strategyResults.trades.slice(-10).map((trade, index) => (
+                      <tr key={index} className="border-b">
+                        <td className="px-4 py-2">{trade.date}</td>
+                        <td className="px-4 py-2">
+                          <span className={`px-2 py-1 rounded text-xs font-medium ${
+                            trade.action === 'BUY' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                          }`}>
+                            {trade.action}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2">₹{trade.price.toFixed(2)}</td>
+                        <td className="px-4 py-2">
+                          {trade.profit !== undefined ? (
+                            <span className={trade.profit >= 0 ? 'text-green-600' : 'text-red-600'}>
+                              {formatNumber(trade.profit)}
+                            </span>
+                          ) : '-'}
+                        </td>
+                        <td className="px-4 py-2">
+                          {trade.profitPercent !== undefined ? (
+                            <span className={trade.profitPercent >= 0 ? 'text-green-600' : 'text-red-600'}>
+                              {formatPercent(trade.profitPercent)}
+                            </span>
+                          ) : '-'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export default EMAStrategyTester;
